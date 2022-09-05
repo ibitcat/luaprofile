@@ -15,6 +15,6 @@ function foo()
 end
 
 foo()
--- print(profile.report(10, "cum"))
--- os.execute("sleep 2")
+print(profile.report(10, 1))
+os.execute("sleep 2")
 print(profile.dstop(10, 4))
