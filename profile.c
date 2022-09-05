@@ -10,6 +10,13 @@
 #include "profile.h"
 #include "imap.h"
 
+// color
+#define KNRM "\x1b[0m"
+#define KRED "\x1b[31m"
+#define KGREEN "\x1b[32m"
+#define KBLUE "\x1b[34m"
+
+#define USE_EXPORT_NAME
 #define get_item(context, idx)    &((context)->record_pool.pool[idx])
 #define cap_item(context)         ((context)->record_pool.cap)
 
@@ -28,9 +35,13 @@ struct record_item {
     char name[MAX_NAME_LEN];
     int line;
     char flag;
-    uint64_t all_cost;
-    double ave_cost;
-    double percent;
+    uint64_t flat_cost;  // 函数自身运行总耗时（排除了该函数调用其他函数的耗时）
+    uint64_t call_cost;  // 函数自身+hook函数运行的总耗时
+    uint64_t cum_cost;   // 函数自身+调用其他函数的总耗时（包括协程的切换）
+    uint64_t flat_avg;   // 函数自身运行的平均耗时
+    uint64_t cum_avg;    // 函数调用的平均耗时
+    double flat_percent; // 函数自身运行总耗时占采样的百分比
+    double cum_percent;  // 函数调用总耗时占采样的百分比
 };
 
 struct call_frame {
@@ -45,13 +56,14 @@ struct call_frame {
     uint64_t ret_time;
     uint64_t sub_cost;
     uint64_t real_cost;
+    uint64_t cum_cost;
+    uint64_t call_cost;
 };
-
 
 struct call_state {
     int top;
-    double leave_time;
-    double enter_time;
+    uint64_t leave_time;
+    uint64_t enter_time;
     struct call_frame call_list[0];
 };
 
@@ -81,7 +93,7 @@ static struct profile_context *
 profile_create() {
     struct profile_context* context = (struct profile_context*)pmalloc(
         sizeof(struct profile_context) + sizeof(struct call_info)*MAX_CI_SIZE);
-    
+
     context->start = false;
     context->imap = imap_create();
     context->co_map = imap_create();
@@ -163,8 +175,8 @@ get_call_state(struct profile_context* context, lua_State* co, int* co_status) {
     if(cs == NULL) {
         cs = (struct call_state*)pmalloc(sizeof(struct call_state) + sizeof(struct call_frame)*MAX_CALL_SIZE);
         cs->top = 0;
-        cs->enter_time = 0.0;
-        cs->leave_time = 0.0;
+        cs->enter_time = 0;
+        cs->leave_time = 0;
         imap_set(context->co_map, key, cs);
     }
 
@@ -238,16 +250,22 @@ record_item_add(struct profile_context* context, struct call_frame* frame) {
         strncpy(item->name, frame->name, sizeof(item->name));
         item->name[MAX_NAME_LEN-1] = '\0'; // padding zero terimal
         item->line = frame->line;
-        item->all_cost = 0;
-        item->ave_cost = 0.0;
-        item->percent = 0.0;
+        item->flat_cost = 0;
+        item->call_cost = 0;
+        item->cum_cost = 0;
+        item->flat_avg = 0;
+        item->cum_avg = 0;
+        item->flat_percent = 0.0;
+        item->cum_percent = 0.0;
         imap_set(context->imap, key, (void*)(pos));
     } else {
         item = get_item(context, record_pos-1);
     }
 
     item->count++;
-    item->all_cost += frame->real_cost;
+    item->flat_cost += frame->real_cost;
+    item->call_cost += frame->call_cost;
+    item->cum_cost += frame->cum_cost;
 }
 
 
@@ -261,7 +279,7 @@ record_item_add(struct profile_context* context, struct call_frame* frame) {
 
     static inline double
     realtime(uint64_t t) {
-        return (double) t / (2000000000);
+        return (double)t / (2000000000);
     }
 #else
     static inline uint64_t
@@ -297,6 +315,10 @@ static void
 _resolve_hook(lua_State* L, lua_Debug* arv) {
     uint64_t cur_time = gettime();
     struct profile_context* context = _get_profile(L);
+    if (!context) {
+        lua_sethook(L, NULL, 0, 0);
+        return;
+    }
     if(!context->start) {
         return;
     }
@@ -313,33 +335,39 @@ _resolve_hook(lua_State* L, lua_Debug* arv) {
         return;
     }
 
+    /*
+    co_status:
+    = 0,当前线程正在运行中
+    = 1,进入线程
+    = -1,暂停/退出线程
+    */
+
     int co_status = 0;
     struct call_state* cs = get_call_state(context, L, &co_status);
-    double co_cost = 0.0;
+    uint64_t co_cost = 0;
     if(co_status == 1) {
         cs->enter_time = cur_time;
-        if(cs->leave_time > 0.0) {
+        if (cs->leave_time > 0) {
             co_cost = cs->enter_time - cs->leave_time;
-            assert(co_cost>0.0);
+            assert(co_cost > 0);
         }
-
     }else if(co_status == -1) {
         struct call_info* ci = pop_callinfo(context);
         ci->cs->leave_time = cur_time;
         co_cost = ci->cs->leave_time - ci->cs->enter_time;
-        assert(co_cost>0.0);
+        assert(co_cost > 0);
     }
 
     #ifdef OPEN_DEBUG
         printf("hook L:%p ci_count:%d name:%s source:%s:%d event:%d\n", L, context->ci_top, name, source, line, event);
     #endif
     if(event == LUA_HOOKCALL || event == LUA_HOOKTAILCALL) {
-        #ifdef USE_EXPORT_NAME
-            lua_getinfo(L, "nSlf", &ar);
-            name = ar.name;
-        #else
-            lua_getinfo(L, "Slf", &ar);
-        #endif
+#ifdef USE_EXPORT_NAME
+        lua_getinfo(L, "nSlf", &ar);
+        name = ar.name;
+#else
+        lua_getinfo(L, "Slf", &ar);
+#endif
         point = lua_topointer(L, -1);
         line = ar.linedefined;
         source = ar.source;
@@ -370,27 +398,37 @@ _resolve_hook(lua_State* L, lua_Debug* arv) {
         frame->line = line;
         frame->record_time = cur_time;
         frame->sub_cost = 0;
+        frame->cum_cost = 0;
         frame->call_time = gettime();
-
+        // printf(KRED "[call hook] L:%p ci_count:%d name:%s source:%s:%d event:%d co_status:%d time=%lu\n" KNRM,
+        //        L, context->ci_top, name, source, line, event, co_status, cur_time);
     }else if(event == LUA_HOOKRET) {
         int len = cs->top;
         if(len <= 0) {
+            // printf(KBLUE "[ret hook] L:%p ci_count:%d name:%s source:%s:%d event:%d co_status:%d\n" KNRM,
+            //        L, context->ci_top, name, source, line, event, co_status);
             return;
         }
         bool tail_call = false;
         do {
+            uint64_t real_cur_time = gettime();
             struct call_frame* cur_frame = pop_callframe(cs);
             cur_frame->sub_cost += co_cost;
             uint64_t total_cost = cur_time - cur_frame->call_time;
             uint64_t real_cost = total_cost - cur_frame->sub_cost;
             cur_frame->ret_time = cur_time;
             cur_frame->real_cost = real_cost;
+            cur_frame->cum_cost = real_cur_time - cur_frame->record_time;
+            cur_frame->call_cost = cur_frame->cum_cost - cur_frame->sub_cost;
             record_item_add(context, cur_frame);
+            // printf(KGREEN "[ret hook] L:%p ci_count:%d name:%s source:%s:%d event:%d co_status:%d time=%lu sub_cost=%lu\n" KNRM,
+            //        L, context->ci_top, cur_frame->name, cur_frame->source, cur_frame->line, event, co_status, cur_time, cur_frame->sub_cost);
+
             struct call_frame* pre_frame = cur_callframe(cs);
             if(pre_frame) {
                 tail_call = cur_frame->tail;
-                cur_time = gettime();
-                uint64_t s = cur_time - cur_frame->record_time;
+                // cur_time = gettime();
+                uint64_t s = real_cur_time - cur_frame->record_time;
                 pre_frame->sub_cost += s;
             }else {
                 tail_call = false;
@@ -437,7 +475,8 @@ _lunmark(lua_State* L) {
 struct dump_arg {
     int stage;
     struct profile_context* context;
-    double total;
+    uint64_t flat_total; // flat总耗时
+    uint64_t cum_total;  // cum总耗时
 
     int cap;
     struct record_item** records;
@@ -450,23 +489,52 @@ _observer(uint64_t key, void* value, void* ud) {
     struct record_item* item = get_item(args->context, pos-1);
 
     if(args->stage == 0) {
-        args->total += realtime(item->all_cost);
-        item->ave_cost = realtime(item->all_cost) / item->count;
+        args->flat_total += item->flat_cost;
+        args->cum_total += item->call_cost;
+        item->flat_avg = item->flat_cost / item->count;
+        item->cum_avg = item->cum_cost / item->count;
     }else if(args->stage == 1) {
-        item->percent = realtime(item->all_cost) / args->total;
+        item->flat_percent = (double)item->flat_cost / args->flat_total;
+        item->cum_percent = (double)item->cum_cost / args->cum_total;
         args->records[args->cap++] = item;
     }
 }
 
-
+// sort by cum_cost
 static int
-_compar(const void* v1, const void* v2) {
+_compar1(const void *v1, const void *v2) {
     struct record_item* a = *(struct record_item**)v1;
     struct record_item* b = *(struct record_item**)v2;
-    signed long long f = b->all_cost - a->all_cost;
+    signed long long f = b->cum_cost - a->cum_cost;
+    return (f < 0) ? (-1) : (1);
+}
+
+// sort by cum_avg
+static int
+_compar2(const void *v1, const void *v2) {
+    struct record_item *a = *(struct record_item **)v1;
+    struct record_item *b = *(struct record_item **)v2;
+    signed long long f = b->cum_avg - a->cum_avg;
     return (f<0)?(-1):(1);
 }
 
+// sort by flat_cost
+static int
+_compar3(const void *v1, const void *v2) {
+    struct record_item *a = *(struct record_item **)v1;
+    struct record_item *b = *(struct record_item **)v2;
+    signed long long f = b->flat_cost - a->flat_cost;
+    return (f < 0) ? (-1) : (1);
+}
+
+// sort by flat_avg
+static int
+_compar4(const void *v1, const void *v2) {
+    struct record_item *a = *(struct record_item **)v1;
+    struct record_item *b = *(struct record_item **)v2;
+    signed long long f = b->flat_avg - a->flat_avg;
+    return (f < 0) ? (-1) : (1);
+}
 
 static void
 _item2table(lua_State* L, struct record_item* v) {
@@ -491,14 +559,23 @@ _item2table(lua_State* L, struct record_item* v) {
     lua_pushinteger(L, v->count);
     lua_setfield(L, -2, "count");
 
-    lua_pushnumber(L, realtime(v->all_cost));
-    lua_setfield(L, -2, "all_cost");
+    lua_pushnumber(L, realtime(v->cum_cost));
+    lua_setfield(L, -2, "cum");
 
-    lua_pushnumber(L, v->ave_cost);
-    lua_setfield(L, -2, "ave_cost");
+    lua_pushnumber(L, realtime(v->cum_avg));
+    lua_setfield(L, -2, "cum_avg");
 
-    lua_pushnumber(L, v->percent);
-    lua_setfield(L, -2, "percent");
+    lua_pushnumber(L, v->cum_percent);
+    lua_setfield(L, -2, "cum_percent");
+
+    lua_pushnumber(L, realtime(v->flat_cost));
+    lua_setfield(L, -2, "flat");
+
+    lua_pushnumber(L, realtime(v->flat_avg));
+    lua_setfield(L, -2, "flat_avg");
+
+    lua_pushnumber(L, v->flat_percent);
+    lua_setfield(L, -2, "flat_percent");
 }
 
 
@@ -531,12 +608,14 @@ dump_record_items(lua_State *L, struct profile_context* context) {
 
     size_t sz = context->record_pool.cap;
     size_t count = (size_t)luaL_optinteger(L, 1, sz);
+    int sort = (int)luaL_optinteger(L, 2, 1);
     count = (count > sz)?(sz):(count);
 
     struct dump_arg arg;
     arg.context = context;
     arg.stage = 0;
-    arg.total = 0.0;
+    arg.flat_total = 0;
+    arg.cum_total = 0;
     arg.cap = 0;
     arg.records = (struct record_item**)pmalloc(sz*sizeof(struct record_item*));
 
@@ -548,9 +627,32 @@ dump_record_items(lua_State *L, struct profile_context* context) {
     imap_dump(context->imap, _observer, (void*)&arg);
 
     // sort record
-    qsort((void*)arg.records, arg.cap, sizeof(struct record_item*), _compar);
+    switch (sort) {
+    case 1:
+        qsort((void *)arg.records, arg.cap, sizeof(struct record_item *), _compar1);
+        break;
+    case 2:
+        qsort((void *)arg.records, arg.cap, sizeof(struct record_item *), _compar2);
+        break;
+    case 3:
+        qsort((void *)arg.records, arg.cap, sizeof(struct record_item *), _compar3);
+        break;
+    case 4:
+        qsort((void *)arg.records, arg.cap, sizeof(struct record_item *), _compar4);
+        break;
+    default:
+        lua_pushstring(L, "invalid sort type.");
+        lua_error(L);
+        break;
+    }
 
     lua_newtable(L);
+    lua_pushnumber(L, realtime(arg.flat_total));
+    lua_setfield(L, -2, "flat_total");
+
+    lua_pushnumber(L, realtime(arg.cum_total));
+    lua_setfield(L, -2, "cum_total");
+
     int i=0;
     for(i=0; i<count; i++) {
         struct record_item* v = arg.records[i];

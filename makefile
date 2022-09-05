@@ -7,7 +7,7 @@ macosx:
 		imap.c profile.c
 
 linux:
-	gcc -shared -fPIC -Wall -g -O2 -DUSE_RDTSC \
+	gcc -shared -fPIC -Wall -g -O2 -DUSE_RDTSC -I/usr/include/lua5.3 \
 		-o profile.so \
 		imap.c profile.c
 
