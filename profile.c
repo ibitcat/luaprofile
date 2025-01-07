@@ -15,6 +15,7 @@
 
 #define NANOSEC                     1000000000
 #define MICROSEC                    1000000
+#define MILLISEC                    1000
 #define MAX_SOURCE_LEN              128
 #define MAX_NAME_LEN                32
 #define MAX_CALL_SIZE               1024
@@ -264,23 +265,37 @@ record_item_add(struct profile_context* context, struct call_frame* frame) {
         return (double) t / (2000000000);
     }
 #else
-    static inline uint64_t
-    gettime() {
-        struct timespec ti;
-        // clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ti);
-        // clock_gettime(CLOCK_MONOTONIC, &ti);  
-        clock_gettime(CLOCK_REALTIME, &ti);  // would be faster
+    #ifdef __EMSCRIPTEN__
+        #include <emscripten.h>
+        static inline uint64_t
+        gettime() {
+            uint64_t n = (uint64_t)emscripten_get_now();
+            return n;
+        }
 
-        long sec = ti.tv_sec & 0xffff;
-        long nsec = ti.tv_nsec;
+        static inline double
+        realtime(uint64_t t) {
+            return (double)t / MILLISEC;
+        }
+    #else
+        static inline uint64_t
+        gettime() {
+            struct timespec ti;
+            // clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ti);
+            // clock_gettime(CLOCK_MONOTONIC, &ti);  
+            clock_gettime(CLOCK_REALTIME, &ti);  // would be faster
 
-        return sec * NANOSEC + nsec;
-    }
+            long sec = ti.tv_sec & 0xffff;
+            long nsec = ti.tv_nsec;
 
-    static inline double
-    realtime(uint64_t t) {
-        return (double)t / NANOSEC;
-    }
+            return sec * NANOSEC + nsec;
+        }
+
+        static inline double
+        realtime(uint64_t t) {
+            return (double)t / NANOSEC;
+        }
+    #endif
 #endif
 
 
@@ -320,14 +335,14 @@ _resolve_hook(lua_State* L, lua_Debug* arv) {
         cs->enter_time = cur_time;
         if(cs->leave_time > 0.0) {
             co_cost = cs->enter_time - cs->leave_time;
-            assert(co_cost>0.0);
+            assert(co_cost>=0.0);
         }
 
     }else if(co_status == -1) {
         struct call_info* ci = pop_callinfo(context);
         ci->cs->leave_time = cur_time;
         co_cost = ci->cs->leave_time - ci->cs->enter_time;
-        assert(co_cost>0.0);
+        assert(co_cost>=0.0);
     }
 
     #ifdef OPEN_DEBUG
