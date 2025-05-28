@@ -22,6 +22,7 @@
 
 #define NANOSEC                     1000000000
 #define MICROSEC                    1000000
+#define MILLISEC                    1000
 #define MAX_SOURCE_LEN              128
 #define MAX_NAME_LEN                32
 #define MAX_CALL_SIZE               1024
@@ -35,13 +36,13 @@ struct record_item {
     char name[MAX_NAME_LEN];
     int line;
     char flag;
-    uint64_t flat_cost;  // å‡½æ•°è‡ªèº«è¿è¡Œæ€»è€—æ—¶ï¼ˆæ’é™¤äº†è¯¥å‡½æ•°è°ƒç”¨å…¶ä»–å‡½æ•°çš„è€—æ—¶ï¼‰
-    uint64_t call_cost;  // å‡½æ•°è‡ªèº«+hookå‡½æ•°è¿è¡Œçš„æ€»è€—æ—¶
-    uint64_t cum_cost;   // å‡½æ•°è‡ªèº«+è°ƒç”¨å…¶ä»–å‡½æ•°çš„æ€»è€—æ—¶ï¼ˆåŒ…æ‹¬åç¨‹çš„åˆ‡æ¢ï¼‰
-    uint64_t flat_avg;   // å‡½æ•°è‡ªèº«è¿è¡Œçš„å¹³å‡è€—æ—¶
-    uint64_t cum_avg;    // å‡½æ•°è°ƒç”¨çš„å¹³å‡è€—æ—¶
-    double flat_percent; // å‡½æ•°è‡ªèº«è¿è¡Œæ€»è€—æ—¶å é‡‡æ ·çš„ç™¾åˆ†æ¯”
-    double cum_percent;  // å‡½æ•°è°ƒç”¨æ€»è€—æ—¶å é‡‡æ ·çš„ç™¾åˆ†æ¯”
+    uint64_t flat_cost;  // º¯Êı×ÔÉíÔËĞĞ×ÜºÄÊ±£¨ÅÅ³ıÁË¸Ãº¯Êıµ÷ÓÃÆäËûº¯ÊıµÄºÄÊ±£©
+    uint64_t call_cost;  // º¯Êı×ÔÉí+hookº¯ÊıÔËĞĞµÄ×ÜºÄÊ±
+    uint64_t cum_cost;   // º¯Êı×ÔÉí+µ÷ÓÃÆäËûº¯ÊıµÄ×ÜºÄÊ±£¨°üÀ¨Ğ­³ÌµÄÇĞ»»£©
+    uint64_t flat_avg;   // º¯Êı×ÔÉíÔËĞĞµÄÆ½¾ùºÄÊ±
+    uint64_t cum_avg;    // º¯Êıµ÷ÓÃµÄÆ½¾ùºÄÊ±
+    double flat_percent; // º¯Êı×ÔÉíÔËĞĞ×ÜºÄÊ±Õ¼²ÉÑùµÄ°Ù·Ö±È
+    double cum_percent;  // º¯Êıµ÷ÓÃ×ÜºÄÊ±Õ¼²ÉÑùµÄ°Ù·Ö±È
 };
 
 struct call_frame {
@@ -282,23 +283,37 @@ record_item_add(struct profile_context* context, struct call_frame* frame) {
         return (double)t / (2000000000);
     }
 #else
-    static inline uint64_t
-    gettime() {
-        struct timespec ti;
-        // clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ti);
-        // clock_gettime(CLOCK_MONOTONIC, &ti);  
-        clock_gettime(CLOCK_REALTIME, &ti);  // would be faster
+    #ifdef __EMSCRIPTEN__
+        #include <emscripten.h>
+        static inline uint64_t
+        gettime() {
+            uint64_t n = (uint64_t)emscripten_get_now();
+            return n;
+        }
 
-        long sec = ti.tv_sec & 0xffff;
-        long nsec = ti.tv_nsec;
+        static inline double
+        realtime(uint64_t t) {
+            return (double)t / MILLISEC;
+        }
+    #else
+        static inline uint64_t
+        gettime() {
+            struct timespec ti;
+            // clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ti);
+            // clock_gettime(CLOCK_MONOTONIC, &ti);  
+            clock_gettime(CLOCK_REALTIME, &ti);  // would be faster
 
-        return sec * NANOSEC + nsec;
-    }
+            long sec = ti.tv_sec & 0xffff;
+            long nsec = ti.tv_nsec;
 
-    static inline double
-    realtime(uint64_t t) {
-        return (double)t / NANOSEC;
-    }
+            return sec * NANOSEC + nsec;
+        }
+
+        static inline double
+        realtime(uint64_t t) {
+            return (double)t / NANOSEC;
+        }
+    #endif
 #endif
 
 
@@ -337,9 +352,9 @@ _resolve_hook(lua_State* L, lua_Debug* arv) {
 
     /*
     co_status:
-    = 0,å½“å‰çº¿ç¨‹æ­£åœ¨è¿è¡Œä¸­
-    = 1,è¿›å…¥çº¿ç¨‹
-    = -1,æš‚åœ/é€€å‡ºçº¿ç¨‹
+    = 0,µ±Ç°Ïß³ÌÕıÔÚÔËĞĞÖĞ
+    = 1,½øÈëÏß³Ì
+    = -1,ÔİÍ£/ÍË³öÏß³Ì
     */
 
     int co_status = 0;
@@ -349,13 +364,13 @@ _resolve_hook(lua_State* L, lua_Debug* arv) {
         cs->enter_time = cur_time;
         if (cs->leave_time > 0) {
             co_cost = cs->enter_time - cs->leave_time;
-            assert(co_cost > 0);
+            assert(co_cost>=0.0);
         }
     }else if(co_status == -1) {
         struct call_info* ci = pop_callinfo(context);
         ci->cs->leave_time = cur_time;
         co_cost = ci->cs->leave_time - ci->cs->enter_time;
-        assert(co_cost > 0);
+        assert(co_cost>=0.0);
     }
 
     #ifdef OPEN_DEBUG
@@ -475,8 +490,8 @@ _lunmark(lua_State* L) {
 struct dump_arg {
     int stage;
     struct profile_context* context;
-    uint64_t flat_total; // flatæ€»è€—æ—¶
-    uint64_t cum_total;  // cumæ€»è€—æ—¶
+    uint64_t flat_total; // flat×ÜºÄÊ±
+    uint64_t cum_total;  // cum×ÜºÄÊ±
 
     int cap;
     struct record_item** records;
