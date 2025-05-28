@@ -36,13 +36,13 @@ struct record_item {
     char name[MAX_NAME_LEN];
     int line;
     char flag;
-    uint64_t flat_cost;  // º¯Êı×ÔÉíÔËĞĞ×ÜºÄÊ±£¨ÅÅ³ıÁË¸Ãº¯Êıµ÷ÓÃÆäËûº¯ÊıµÄºÄÊ±£©
-    uint64_t call_cost;  // º¯Êı×ÔÉí+hookº¯ÊıÔËĞĞµÄ×ÜºÄÊ±
-    uint64_t cum_cost;   // º¯Êı×ÔÉí+µ÷ÓÃÆäËûº¯ÊıµÄ×ÜºÄÊ±£¨°üÀ¨Ğ­³ÌµÄÇĞ»»£©
-    uint64_t flat_avg;   // º¯Êı×ÔÉíÔËĞĞµÄÆ½¾ùºÄÊ±
-    uint64_t cum_avg;    // º¯Êıµ÷ÓÃµÄÆ½¾ùºÄÊ±
-    double flat_percent; // º¯Êı×ÔÉíÔËĞĞ×ÜºÄÊ±Õ¼²ÉÑùµÄ°Ù·Ö±È
-    double cum_percent;  // º¯Êıµ÷ÓÃ×ÜºÄÊ±Õ¼²ÉÑùµÄ°Ù·Ö±È
+    uint64_t flat_cost;  // å‡½æ•°è‡ªèº«è¿è¡Œæ€»è€—æ—¶ï¼ˆæ’é™¤äº†è¯¥å‡½æ•°è°ƒç”¨å…¶ä»–å‡½æ•°çš„è€—æ—¶ï¼‰
+    uint64_t call_cost;  // å‡½æ•°è‡ªèº«+hookå‡½æ•°è¿è¡Œçš„æ€»è€—æ—¶
+    uint64_t cum_cost;   // å‡½æ•°è‡ªèº«+è°ƒç”¨å…¶ä»–å‡½æ•°çš„æ€»è€—æ—¶ï¼ˆåŒ…æ‹¬åç¨‹çš„åˆ‡æ¢ï¼‰
+    uint64_t flat_avg;   // å‡½æ•°è‡ªèº«è¿è¡Œçš„å¹³å‡è€—æ—¶
+    uint64_t cum_avg;    // å‡½æ•°è°ƒç”¨çš„å¹³å‡è€—æ—¶
+    double flat_percent; // å‡½æ•°è‡ªèº«è¿è¡Œæ€»è€—æ—¶å é‡‡æ ·çš„ç™¾åˆ†æ¯”
+    double cum_percent;  // å‡½æ•°è°ƒç”¨æ€»è€—æ—¶å é‡‡æ ·çš„ç™¾åˆ†æ¯”
 };
 
 struct call_frame {
@@ -352,9 +352,9 @@ _resolve_hook(lua_State* L, lua_Debug* arv) {
 
     /*
     co_status:
-    = 0,µ±Ç°Ïß³ÌÕıÔÚÔËĞĞÖĞ
-    = 1,½øÈëÏß³Ì
-    = -1,ÔİÍ£/ÍË³öÏß³Ì
+    = 0,å½“å‰çº¿ç¨‹æ­£åœ¨è¿è¡Œä¸­
+    = 1,è¿›å…¥çº¿ç¨‹
+    = -1,æš‚åœ/é€€å‡ºçº¿ç¨‹
     */
 
     int co_status = 0;
@@ -490,8 +490,8 @@ _lunmark(lua_State* L) {
 struct dump_arg {
     int stage;
     struct profile_context* context;
-    uint64_t flat_total; // flat×ÜºÄÊ±
-    uint64_t cum_total;  // cum×ÜºÄÊ±
+    uint64_t flat_total; // flatæ€»è€—æ—¶
+    uint64_t cum_total;  // cumæ€»è€—æ—¶
 
     int cap;
     struct record_item** records;
